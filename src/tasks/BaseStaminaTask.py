@@ -1,7 +1,9 @@
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from ok import CannotFindException
+from ok.util.config import Config
 
 from src.Labels import Labels
 from src.tasks.BaseNTETask import BaseNTETask
@@ -19,6 +21,9 @@ class BaseStaminaTask(NTEOneTimeTask, BaseNTETask):
     CONF_STAMINA_TARGET = "目标消耗体力"
     DAILY_STAMINA_REQUIREMENT = 180
     DAILY_ACTIVITY_REQUIREMENT = 100
+    STAMINA_RECORD_FOLDER = "configs/records"
+    # 游戏每日 05:00 重置, "游戏日"以 (now - 5h) 的日期计算
+    DAILY_RESET_HOUR = 5
     DESC_STAMINA_TARGET_FMT = (
         "按今日累计消耗计算, 扣除已消耗体力; 每份奖励{cost}体力, 剩余目标向上取整。\n"
         "今日已消耗180体力或活跃度达100时跳过; 体力不足时仅刷可领取的次数。"
@@ -50,6 +55,10 @@ class BaseStaminaTask(NTEOneTimeTask, BaseNTETask):
         activity_box = self.box_of_screen(0.184, 0.188, 0.256, 0.255, name="activity", hcenter=True)
 
         activity = self.ocr(box=activity_box, match=activity_re)
+        if not activity:
+            # 活跃度大字偶发 OCR 失败时重试一次, 避免把可恢复的读取失败当成缺失
+            self.sleep(1)
+            activity = self.ocr(box=activity_box, match=activity_re)
         for attempt in range(2):
             mission = self.ocr(box=mission_box, match=mission_re)
             match = next(
@@ -106,12 +115,51 @@ class BaseStaminaTask(NTEOneTimeTask, BaseNTETask):
             if activity.daily_activity is None:
                 raise ValueError("无法识别每日体力消耗或活跃度")
             # 新版活跃度面板已移除 x/180 已消耗体力显示:
-            # 活跃度可读时按未消耗处理, 由活跃度达标校验与体力池余量兜底
+            # 活跃度可读时按未消耗处理, 由活跃度达标校验与当日已安排量兜底
             return target
+        if activity.daily_activity is None:
+            # 体力可读但活跃度读不到: 无法确认是否达标, 不能仅按差值继续安排
+            raise ValueError("无法识别每日活跃度")
         return max(0, target - activity.used_stamina)
 
     def check_activity(self) -> bool:
         return self.daily_activity_complete(self.read_daily_activity())
+
+    def _stamina_state(self) -> Config:
+        if not hasattr(self, "_stamina_state_config"):
+            self._stamina_state_config = Config(
+                f"{self.__class__.__name__}_stamina",
+                {"game_day": "", "scheduled": 0},
+                folder=self.STAMINA_RECORD_FOLDER,
+            )
+        return self._stamina_state_config
+
+    def _game_day(self) -> str:
+        return (datetime.now() - timedelta(hours=self.DAILY_RESET_HOUR)).strftime("%Y-%m-%d")
+
+    def stamina_scheduled_today(self) -> int:
+        """当日已由本工具安排消耗的体力 (读不到已消耗体力时用于同日去重)。"""
+        state = self._stamina_state()
+        if state.get("game_day") != self._game_day():
+            return 0
+        return int(state.get("scheduled", 0))
+
+    def add_stamina_scheduled(self, amount: int):
+        if amount <= 0:
+            return
+        state = self._stamina_state()
+        if state.get("game_day") != self._game_day():
+            state["game_day"] = self._game_day()
+            state["scheduled"] = 0
+        state["scheduled"] = int(state.get("scheduled", 0)) + amount
+        state.save_file()
+
+    @classmethod
+    def apply_scheduled_offset(cls, remaining: int, activity: DailyActivity, scheduled_today: int) -> int:
+        """仅在读不到已消耗体力时, 从剩余目标中扣除当日已安排的量。"""
+        if activity.used_stamina is not None:
+            return remaining
+        return max(0, remaining - scheduled_today)
 
     def resolve_stamina_target(self) -> int | None:
         """Return the remaining daily target, or None for reward-count mode."""
@@ -122,6 +170,11 @@ class BaseStaminaTask(NTEOneTimeTask, BaseNTETask):
         if target > 0:
             activity = self.read_daily_activity()
             must_use = self.calculate_remaining_stamina(activity, target)
+            if activity.used_stamina is None:
+                # 新 UI 读不到已消耗体力: 扣除当日已安排量, 避免同日重复运行超额消耗
+                must_use = self.apply_scheduled_offset(
+                    must_use, activity, self.stamina_scheduled_today())
+                self.add_stamina_scheduled(must_use)
         self.info_set("must use stamina", must_use)
         if must_use == 0:
             self.log_info("体力消耗目标或每日活跃度已达标, 跳过每日体力任务")
