@@ -29,10 +29,13 @@ class BaseStaminaTask(NTEOneTimeTask, BaseNTETask):
             self.openF1panel()
             self.operate_click(*self.pos.panels.f1.activity)
             self.sleep(0.5)
-            # 新版「探索指南」面板中旧模板 f1_activity_panel 已失效,
-            # 改用 OCR 识别页面上的「活跃度」标题
+            # 新版「探索指南」面板中旧模板 f1_activity_panel 已失效, 改用 OCR 识别「活跃度」文案。
+            # 传 re.Pattern 而非 str, 使 i18n 词典 (ocr_po_translation) 能按游戏语言翻译;
+            # 词典未收录时以 Activity/Daily Activity 兜底兼容英文界面
             return self.wait_until(
-                lambda: self.ocr(0.10, 0.14, 0.35, 0.30, match="活跃度"),
+                lambda: self.ocr(
+                    0.10, 0.14, 0.35, 0.32,
+                    match=[re.compile("活跃度"), re.compile(r"(?i)daily\s*activity|activity")]),
                 time_out=5,
                 raise_if_not_found=False,
             )

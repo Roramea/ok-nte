@@ -974,11 +974,20 @@ class BaseNTETask(
     def open_f1_domain_page(self):
         self.openF1panel()
 
-        # 新版「探索指南」面板中旧模板 stamina_icon 已失效,
-        # 改用 OCR 识别资源副本页的子页签行
-        domain_tabs = ["异象追猎", "异象巡礼", "轨外之境", "空幕", "弧盘突破材料", "异能升级材料", "经验及甲硬币"]
+        # 新版「探索指南」面板中旧模板 stamina_icon 已失效。
+        # 子页签文案逐条编译为 re.Pattern, 使 i18n 词典 (ocr_po_translation) 能按游戏语言逐条翻译
+        # (如「异象追猎」在 en_US 词典中为 Anomaly Hunts); 另以右上角体力 "x/360" 作语言无关兜底
+        domain_tabs = [re.compile(t) for t in (
+            "异象追猎", "异象巡礼", "轨外之境", "空幕", "弧盘突破材料", "异能升级材料", "经验及甲硬币")]
+        stamina_re = re.compile(r"\d+\s*/\s*\d+")
+
+        def on_domain_page():
+            if self.ocr(0.10, 0.09, 0.97, 0.20, match=domain_tabs):
+                return True
+            return self.ocr(0.80, 0.02, 0.99, 0.09, match=stamina_re)
+
         self.wait_until(
-            lambda: self.ocr(0.10, 0.09, 0.97, 0.20, match=domain_tabs),
+            on_domain_page,
             post_action=lambda: self.operate_click(*self.pos.panels.f1.domain.entry, interval=1),
             settle_time=0.5,
             time_out=10,
